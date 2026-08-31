@@ -1,4 +1,14 @@
-export const USER_AGENT = 'chess-analyzer/0.1 (contact-not-set)';
+/**
+ * chess.com blocks anonymous clients and asks for contact info in the
+ * User-Agent, so it must carry something they can reach you at. It is read
+ * from the environment rather than hardcoded, to keep a personal email out of
+ * the source. Set CHESS_CONTACT to your own email before importing.
+ */
+export function buildUserAgent(contact) {
+  return `chess-analyzer/0.1 (${contact || 'contact-not-set'})`;
+}
+
+export const USER_AGENT = buildUserAgent(process.env.CHESS_CONTACT);
 const BASE = 'https://api.chess.com/pub';
 
 function headerOf(res, name) {
