@@ -14,6 +14,7 @@ export class Engine {
   #proc = null;
   #buffer = '';
   #waiters = [];
+  #queue = Promise.resolve();
 
   constructor({ path = DEFAULT_PATH, depth = 14, multipv = 3 } = {}) {
     this.path = path;
@@ -22,29 +23,33 @@ export class Engine {
   }
 
   async start() {
-    this.#proc = spawn(this.path, [], { stdio: ['pipe', 'pipe', 'ignore'] });
-    this.#proc.stdout.setEncoding('utf8');
-    this.#proc.stdout.on('data', (chunk) => this.#onData(chunk));
+    return this.#serialize(async () => {
+      this.#proc = spawn(this.path, [], { stdio: ['pipe', 'pipe', 'ignore'] });
+      this.#proc.stdout.setEncoding('utf8');
+      this.#proc.stdout.on('data', (chunk) => this.#onData(chunk));
 
-    await this.#command('uci', (l) => l === 'uciok');
-    this.#send(`setoption name MultiPV value ${this.multipv}`);
-    await this.#command('isready', (l) => l === 'readyok');
-    return this;
+      await this.#command('uci', (l) => l === 'uciok');
+      this.#send(`setoption name MultiPV value ${this.multipv}`);
+      await this.#command('isready', (l) => l === 'readyok');
+      return this;
+    });
   }
 
   async analyze(fen) {
-    const sideToMove = fen.split(' ')[1];
-    this.#send(`position fen ${fen}`);
-    const output = await this.#command(`go depth ${this.depth}`, (l) => l.startsWith('bestmove'));
+    return this.#serialize(async () => {
+      const sideToMove = fen.split(' ')[1];
+      this.#send(`position fen ${fen}`);
+      const output = await this.#command(`go depth ${this.depth}`, (l) => l.startsWith('bestmove'));
 
-    const lines = collectBestLines(output).map((l) => ({
-      multipv: l.multipv,
-      move: l.pv[0] ?? null,
-      pv: l.pv,
-      cpWhite: toWhitePov(toCentipawns(l.score), sideToMove),
-    }));
+      const lines = collectBestLines(output).map((l) => ({
+        multipv: l.multipv,
+        move: l.pv[0] ?? null,
+        pv: l.pv,
+        cpWhite: toWhitePov(toCentipawns(l.score), sideToMove),
+      }));
 
-    return { evalWhite: lines.length ? lines[0].cpWhite : null, lines };
+      return { evalWhite: lines.length ? lines[0].cpWhite : null, lines };
+    });
   }
 
   /** Apply a UCI move to a position and evaluate what it leads to. */
@@ -73,16 +78,36 @@ export class Engine {
     const proc = this.#proc;
     this.#proc = null;
     await new Promise((resolve) => {
-      proc.once('exit', resolve);
-      setTimeout(() => {
+      let timer;
+      proc.once('exit', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      timer = setTimeout(() => {
         proc.kill('SIGKILL');
         resolve();
-      }, 2000).unref();
+      }, 2000);
+      timer.unref();
     });
+    // Unblock any waiter still pending — the process is gone, so no reply is coming.
+    for (const waiter of this.#waiters.splice(0)) {
+      waiter.resolve(waiter.lines);
+    }
   }
 
   #send(cmd) {
     this.#proc.stdin.write(cmd + '\n');
+  }
+
+  /**
+   * Runs one async op at a time, in call order, so a `position`/`go` pair
+   * (or the start-up handshake) can never be interleaved with another call's
+   * commands. A rejection never poisons the chain for later callers.
+   */
+  #serialize(fn) {
+    const run = this.#queue.then(fn, fn);
+    this.#queue = run.then(() => {}, () => {});
+    return run;
   }
 
   /** Register the waiter *before* writing, otherwise fast replies are missed. */
