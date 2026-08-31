@@ -98,3 +98,52 @@ test('recentGames uses the etag store when one is supplied', async () => {
   assert.deepEqual(got, []);
   assert.equal(log[1].headers['If-None-Match'], 'W/"cached"');
 });
+
+test('recentGames does not store ETag for a month truncated by limit', async () => {
+  const store = new Map();
+  const userURL = 'https://api.chess.com/pub/player/testuser/games/archives';
+  const fetchImpl = fakeFetch({
+    [userURL]: { status: 200, body: { archives: ['u/2026/08', 'u/2026/09'] } },
+    'u/2026/09': { status: 200, headers: { etag: 'W/"new9"' }, body: { games: [{ uuid: 'g1', end_time: 10 }] } },
+    'u/2026/08': { status: 200, headers: { etag: 'W/"new8"' }, body: { games: [{ uuid: 'g2', end_time: 9 }, { uuid: 'g3', end_time: 8 }, { uuid: 'g4', end_time: 7 }] } },
+  });
+
+  const got = await recentGames('testuser', {
+    limit: 2,
+    fetchImpl,
+    getEtag: (url) => store.get(url) ?? null,
+    setEtag: (url, etag) => store.set(url, etag),
+  });
+
+  // Should get 2 games total
+  assert.equal(got.length, 2);
+  // u/2026/09 was fully consumed (1 game returned, 1 in store), so its ETag should be stored
+  assert.equal(store.get('u/2026/09'), 'W/"new9"');
+  // u/2026/08 was truncated (3 games available, only 1 returned), so its ETag should NOT be stored
+  assert.equal(store.get('u/2026/08'), undefined);
+});
+
+test('recentGames stores no ETag when an archive throws', async () => {
+  const store = new Map();
+  const userURL = 'https://api.chess.com/pub/player/testuser2/games/archives';
+  const fetchImpl = fakeFetch({
+    [userURL]: { status: 200, body: { archives: ['u/2026/08', 'u/2026/09'] } },
+    'u/2026/09': { status: 200, headers: { etag: 'W/"new9"' }, body: { games: [{ uuid: 'g1', end_time: 10 }] } },
+    'u/2026/08': { status: 500, body: {} },
+  });
+
+  try {
+    await recentGames('testuser2', {
+      limit: 10,
+      fetchImpl,
+      getEtag: (url) => store.get(url) ?? null,
+      setEtag: (url, etag) => store.set(url, etag),
+    });
+    assert.fail('should have thrown');
+  } catch (err) {
+    // Expected to throw
+  }
+
+  // No ETags should be stored, even for u/2026/09 which succeeded
+  assert.equal(store.size, 0);
+});

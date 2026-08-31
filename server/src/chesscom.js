@@ -3,7 +3,7 @@ const BASE = 'https://api.chess.com/pub';
 
 function headerOf(res, name) {
   // Works with both a real Headers object and a Map in tests.
-  if (typeof res.headers?.get === 'function') return res.headers.get(name);
+  if (typeof res.headers?.get === 'function') return res.headers.get(name) ?? null;
   return null;
 }
 
@@ -43,14 +43,24 @@ export async function recentGames(username, {
 
   const archives = await listArchives(username, { fetchImpl });
   const collected = [];
+  const pendingETags = [];
 
   for (let i = archives.length - 1; i >= 0 && collected.length < limit; i--) {
     const url = archives[i];
     const { notModified, games, etag } = await fetchMonth(url, { etag: getEtag(url), fetchImpl });
-    if (!notModified) setEtag(url, etag);
     const sorted = [...games].sort((a, b) => (b.end_time ?? 0) - (a.end_time ?? 0));
     collected.push(...sorted);
+    if (!notModified) {
+      pendingETags.push({ url, etag, upTo: collected.length });
+    }
   }
 
-  return collected.slice(0, limit);
+  const returned = collected.slice(0, limit);
+  for (const { url, etag, upTo } of pendingETags) {
+    if (upTo <= returned.length) {
+      setEtag(url, etag);
+    }
+  }
+
+  return returned;
 }
