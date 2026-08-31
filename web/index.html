@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Chess Review</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0;
+        font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        display: flex; justify-content: center;
+      }
+      main { width: min(560px, 94vw); padding: 24px 0 64px; }
+      button { font: inherit; padding: 8px 14px; border-radius: 8px; cursor: pointer; }
+      table { width: 100%; border-collapse: collapse; }
+      td, th { text-align: left; padding: 8px 6px; border-bottom: 1px solid #8883; }
+      tr[data-clickable] { cursor: pointer; }
+      tr[data-clickable]:hover { background: #8881; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
