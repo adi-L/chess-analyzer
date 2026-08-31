@@ -2,7 +2,6 @@
 
 **Date:** 2026-08-31
 **Status:** Approved design, pending implementation plan
-**Owner:** Adi Levi (chess.com: `ExamplePlayer`)
 
 ## Purpose
 
@@ -16,7 +15,7 @@ before making it. Every design decision below is subordinate to that.
 ## Context
 
 - One user. No accounts, no multi-tenancy, no hosting. Runs on localhost.
-- Player rating: **229 rapid**, account created 2026-08-24, 5 games played.
+- Player rating: **~230 rapid**, a new account with a handful of games.
   This is an absolute beginner, and the design targets that explicitly.
 - Chess.com's Published-Data API is public and unauthenticated. "My games" is
   a username in a URL, not an access boundary.
@@ -224,7 +223,7 @@ faked in tests.
 
 ## Configuration
 
-- `CHESS_USERNAME` — defaults to `ExamplePlayer`
+- `CHESS_USERNAME` — required; the chess.com account to review
 - `STOCKFISH_PATH` — defaults to the Homebrew location
 - Note: exporting `ANTHROPIC_API_KEY` silently switches the Agent SDK from
   subscription to API billing. Currently unset, which is what we want.
