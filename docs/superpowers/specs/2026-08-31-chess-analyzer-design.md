@@ -191,7 +191,7 @@ does not.
 | Layer | Choice |
 |---|---|
 | Engine | Stockfish native binary (`brew install stockfish`), UCI over stdio |
-| Server | Node 24 + Express + `better-sqlite3` |
+| Server | Node 24 + Express + built-in `node:sqlite` (no native build step) |
 | Chess logic | `chess.js` |
 | LLM | `@anthropic-ai/claude-agent-sdk` |
 | Validation | `zod` |
@@ -206,7 +206,11 @@ and no network:
 - **Moment selector** — an array of evals to the chosen plies, covering both
   `blunder` and `missed_win`, the 600cp already-lost skip, the 100cp floor,
   and the five-moment cap (including the case where fewer than five qualify).
-- **Teaching-move selector** — given MultiPV lines, pick and justify.
+- **Explanation contract** — JSON extraction from a fenced or prose-wrapped
+  response, and schema validation of the result. (The teaching *move* itself is
+  chosen by Claude from the MultiPV lines, per pipeline step 5, so there is no
+  pure selector to test — what is testable is the prompt that instructs it and
+  the schema that validates what comes back.)
 
 The Stockfish process and the Agent SDK sit behind thin wrappers so both can be
 faked in tests.
