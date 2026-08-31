@@ -25,6 +25,11 @@ test('parseInfoLine returns null for non-info and incomplete lines', () => {
   assert.equal(parseInfoLine('info string NNUE evaluation using nn-x.nnue'), null);
 });
 
+test('parseInfoLine returns null for truncated depth or score tokens instead of NaN fields', () => {
+  assert.equal(parseInfoLine('info depth 10 multipv 1 score cp'), null);
+  assert.equal(parseInfoLine('info depth multipv 1 score cp 40 pv e2e4'), null);
+});
+
 test('collectBestLines keeps the deepest entry per multipv index and sorts by index', () => {
   const lines = [
     'info depth 8 multipv 1 score cp 10 pv a2a3',
