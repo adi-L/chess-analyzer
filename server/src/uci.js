@@ -29,6 +29,7 @@ export function parseInfoLine(line) {
   }
 
   if (depth === null || score === null) return null;
+  if (!Number.isFinite(depth) || !Number.isFinite(multipv) || !Number.isFinite(score.value)) return null;
   return { depth, multipv, score, pv };
 }
 
