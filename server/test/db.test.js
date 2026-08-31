@@ -105,3 +105,39 @@ test('etags are stored and read back per archive url', () => {
   setEtag(db, 'https://x/2026/08', 'W/"def"');
   assert.equal(getEtag(db, 'https://x/2026/08'), 'W/"def"');
 });
+
+test('saveMoments upserts existing plies so recorded attempts survive re-analysis', () => {
+  const db = seeded();
+  const before = getGameWithMoments(db, 'abc-123');
+  const momentId = before.moments[0].id;
+  recordAttempt(db, momentId, 'Nd5', 10);
+
+  saveMoments(db, GAME.uuid, MOMENTS);
+
+  const after = getGameWithMoments(db, 'abc-123');
+  assert.equal(after.moments[0].id, momentId);
+  const rows = db.prepare('SELECT * FROM attempts WHERE moment_id = ?').all(momentId);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].move, 'Nd5');
+});
+
+test('saveGame refreshes all data columns on conflict, not just username/review_as_color', () => {
+  const db = seeded();
+  const updated = { ...GAME, result: 'win', whiteRating: 999, pgn: '[White "ExamplePlayer"]\n\n1. d4 *' };
+
+  saveGame(db, updated);
+
+  const { game } = getGameWithMoments(db, 'abc-123');
+  assert.equal(game.result, 'win');
+  assert.equal(game.white_rating, 999);
+  assert.equal(game.pgn, updated.pgn);
+});
+
+test('saveGame does not reset analyzed_at on re-import', () => {
+  const db = seeded();
+  markAnalyzed(db, 'abc-123');
+
+  saveGame(db, GAME);
+
+  assert.equal(isAnalyzed(db, 'abc-123'), true);
+});
