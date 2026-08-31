@@ -105,7 +105,7 @@ test('FakeExplainer handles an empty moment list', async () => {
   assert.deepEqual(await new FakeExplainer().explain({ game: GAME, moments: [] }), []);
 });
 
-import { extractResult, ClaudeCliExplainer, CLI_FLAGS } from '../src/explainer/claudeCli.js';
+import { extractResult, ClaudeCliExplainer, CLI_FLAGS, sanitizedEnv } from '../src/explainer/claudeCli.js';
 
 const OK_JSON = JSON.stringify([{
   ply: 20, teachMove: 'd2d3', whatWentWrong: 'The bishop could just be taken.',
@@ -199,4 +199,30 @@ test('ClaudeCliExplainer survives a run that throws', async () => {
     runImpl: async () => { throw new Error('usage limit reached'); },
   });
   assert.deepEqual(await explainer.explain({ game: GAME, moments: MOMENTS }), [null]);
+});
+
+test('sanitizedEnv strips ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN', () => {
+  const fakeEnv = {
+    ANTHROPIC_API_KEY: 'sk-ant-fake',
+    ANTHROPIC_AUTH_TOKEN: 'fake-token',
+    PATH: '/usr/bin',
+    HOME: '/home/user',
+  };
+  const got = sanitizedEnv(fakeEnv);
+  assert.equal('ANTHROPIC_API_KEY' in got, false);
+  assert.equal('ANTHROPIC_AUTH_TOKEN' in got, false);
+  assert.equal(got.PATH, '/usr/bin');
+  assert.equal(got.HOME, '/home/user');
+  // Must not mutate the object it was given.
+  assert.equal(fakeEnv.ANTHROPIC_API_KEY, 'sk-ant-fake');
+});
+
+test('sanitizedEnv is a no-op when the keys are already absent', () => {
+  const fakeEnv = { PATH: '/usr/bin' };
+  const got = sanitizedEnv(fakeEnv);
+  assert.deepEqual(got, { PATH: '/usr/bin' });
+});
+
+test('sanitizedEnv does not throw on an empty env', () => {
+  assert.deepEqual(sanitizedEnv({}), {});
 });

@@ -30,6 +30,18 @@ export function extractResult(stdout) {
 }
 
 /**
+ * Strip ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN from an env object. Either
+ * one silently redirects the `claude` CLI's billing from the user's
+ * subscription to the paid API, with no signal anywhere that it happened -
+ * so `runClaude` must never let either reach the spawned process, even if
+ * they are set in the shell it runs from.
+ */
+export function sanitizedEnv(env = process.env) {
+  const { ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, ...rest } = env;
+  return rest;
+}
+
+/**
  * Spawn `claude -p`. Credentials resolve exactly as they do for the interactive
  * CLI, so this runs on the user's subscription. stdin is closed - the CLI waits
  * on it otherwise and prints a warning after three seconds.
@@ -37,7 +49,7 @@ export function extractResult(stdout) {
 export function runClaude({ prompt, systemPrompt, model, bin = process.env.CLAUDE_BIN || 'claude', timeoutMs = 180000 }) {
   return new Promise((resolve, reject) => {
     const args = ['-p', prompt, '--system-prompt', systemPrompt, '--model', model, ...CLI_FLAGS];
-    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], env: sanitizedEnv() });
 
     let stdout = '';
     let stderr = '';
