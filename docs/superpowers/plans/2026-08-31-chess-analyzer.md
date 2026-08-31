@@ -4,9 +4,9 @@
 
 **Goal:** A localhost tool that replays a chess.com game, stops at the five moments that decided it, quizzes the player on what they should have played, and explains the answer in beginner language.
 
-**Architecture:** Node server owns a long-lived native Stockfish process (UCI over stdio) and a SQLite cache; a React frontend is a board that replays cached analysis and posts quiz attempts back for live evaluation. Explanations come from the Claude Agent SDK running on the user's subscription. All selection logic (ranking, thresholds, teaching-move choice) lives in pure functions testable without an engine or network.
+**Architecture:** Node server owns a long-lived native Stockfish process (UCI over stdio) and a SQLite cache; a React frontend is a board that replays cached analysis and posts quiz attempts back for live evaluation. Explanations come from spawning the `claude` CLI, which runs on the user's existing subscription — no API key anywhere. All selection logic (ranking, thresholds, teaching-move choice) lives in pure functions testable without an engine or network.
 
-**Tech Stack:** Node 24 (ESM, built-in `node:test` and `node:sqlite`), Express, chess.js, zod, `@anthropic-ai/claude-agent-sdk`, Vite + React + react-chessboard, Stockfish native binary.
+**Tech Stack:** Node 24 (ESM, built-in `node:test` and `node:sqlite`), Express, chess.js, zod, the `claude` CLI (subscription auth), Vite + React + react-chessboard, Stockfish native binary.
 
 **Spec:** `docs/superpowers/specs/2026-08-31-chess-analyzer-design.md`
 
@@ -20,7 +20,8 @@
 - Default username: **`Crazy_Harp`** (env `CHESS_USERNAME`).
 - Stockfish path: env `STOCKFISH_PATH`, default `stockfish` on PATH.
 - Claude model: **`claude-opus-5`**. Do not change without instruction.
-- Agent SDK options must always include `settingSources: []` — omitting it injects the user's global CLAUDE.md into every chess prompt.
+- Every `claude` invocation must pass `--system-prompt` (replacing the base prompt, not appending), `--max-turns 1`, and the `--disallowed-tools` list. Measured harness overhead is ~22.6k input tokens per call; it is prompt-cached, so import runs should batch games rather than run one at a time.
+- **No API key, ever.** `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` must stay unset — either one silently redirects billing from the subscription to the API.
 - Never build a live-assistance feature. Post-game analysis only.
 - Scores are stored as **centipawns from White's point of view**. Mate is mapped to `±(100000 - plies_to_mate)`.
 
@@ -43,7 +44,7 @@ chess/
 │   │   │   ├── schema.js    Zod schema for explanation JSON.
 │   │   │   ├── fake.js      Deterministic explainer for tests.
 │   │   │   ├── prompt.js    System prompt + user prompt builder.
-│   │   │   └── agentSdk.js  Claude Agent SDK explainer.
+│   │   │   └── claudeCli.js Explainer that spawns the claude CLI.
 │   │   ├── importer.js      Orchestrates fetch -> analyze -> select -> explain -> store.
 │   │   └── index.js         Express app and routes.
 │   └── test/
@@ -67,7 +68,7 @@ chess/
         └── Review.jsx
 ```
 
-Split is by responsibility, not layer. The three pure modules (`uci`, `moments`, `pgn`) carry the logic worth testing and have no I/O. `engine`, `db`, `chesscom`, and `explainer/agentSdk` are thin adapters over the outside world, each fakeable at its boundary.
+Split is by responsibility, not layer. The three pure modules (`uci`, `moments`, `pgn`) carry the logic worth testing and have no I/O. `engine`, `db`, `chesscom`, and `explainer/claudeCli` are thin adapters over the outside world, each fakeable at its boundary.
 
 ---
 
@@ -102,7 +103,6 @@ Stockfish emits `info` lines during search. This task turns that text into struc
     "start": "node src/index.js"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.1.0",
     "chess.js": "^1.4.0",
     "express": "^5.1.0",
     "zod": "^3.25.0"
@@ -113,7 +113,13 @@ Stockfish emits `info` lines during search. This task turns that text into struc
 - [ ] **Step 2: Install dependencies**
 
 Run: `cd server && npm install`
-Expected: `node_modules/` created, no errors. If `@anthropic-ai/claude-agent-sdk` resolves to a different major, record the installed version and keep it — do not downgrade.
+Expected: `node_modules/` created, no errors. There is no Anthropic npm dependency — explanations go through the `claude` binary. Confirm it is present and authenticated:
+
+```bash
+claude --version && claude -p 'Reply with exactly: OK' --max-turns 1 < /dev/null
+```
+
+Expected: a version string, then `OK`. If this fails, run `claude` once interactively and log in before continuing.
 
 - [ ] **Step 3: Write the failing test**
 
@@ -1428,6 +1434,15 @@ test('parseExplanations accepts a well-formed array', () => {
   assert.equal(got.data[0].teachMove, 'd3');
 });
 
+test('parseExplanations rejects a pattern that runs on into a paragraph', () => {
+  const wordy = JSON.stringify([{
+    ply: 20, teachMove: 'd3', whatWentWrong: 'ok', whyBetter: 'ok',
+    pattern: 'Do not sacrifice a piece for a check unless you can see exactly how you win it back or deliver checkmate.',
+  }]);
+  const got = parseExplanations(wordy);
+  assert.equal(got.ok, false, 'pattern must stay a short label');
+});
+
 test('parseExplanations rejects entries missing required fields', () => {
   const got = parseExplanations('[{"ply":20,"teachMove":"d3"}]');
   assert.equal(got.ok, false);
@@ -1495,16 +1510,18 @@ import { z } from 'zod';
 export const ExplanationSchema = z.object({
   ply: z.number().int().nonnegative(),
   teachMove: z.string().min(2),
-  whatWentWrong: z.string().min(1),
-  whyBetter: z.string().min(1),
-  pattern: z.string().min(1),
+  whatWentWrong: z.string().min(1).max(400),
+  whyBetter: z.string().min(1).max(600),
+  // Verified against a live call: without a ceiling the model writes a
+  // paragraph here. Exceeding it fails validation and triggers the retry.
+  pattern: z.string().min(1).max(40),
 });
 
 export const ExplanationsSchema = z.array(ExplanationSchema);
 
 /**
- * Pull a JSON array out of a model response. The Agent SDK gives no
- * output-format guarantee, so the text may be fenced, prefixed with prose,
+ * Pull a JSON array out of a model response. There is no output-format
+ * guarantee on this path, so the text may be fenced, prefixed with prose,
  * or both.
  */
 export function extractJsonBlock(text) {
@@ -1574,7 +1591,8 @@ order given, each with exactly these keys:
   "teachMove"      - the move to teach, exactly as written in the engine list
   "whatWentWrong"  - one sentence
   "whyBetter"      - one or two sentences
-  "pattern"        - two or three words
+  "pattern"        - two or three words ONLY, e.g. "hanging piece",
+                     "missed capture", "back rank". Not a sentence.
 
 Output only the JSON array. No preamble, no commentary after it.`;
 
@@ -1662,93 +1680,101 @@ git commit -m "feat(explainer): explanation schema, beginner prompt, test fake"
 
 ---
 
-### Task 8: Claude Agent SDK explainer
+### Task 8: Claude CLI explainer
 
-The real explainer. One call per game covering all moments, on the user's Claude subscription, with the Claude Code harness stripped to nothing.
+The real explainer. One call per game covering all moments, on the user's Claude
+subscription, by spawning the `claude` binary that is already installed and
+already authenticated.
+
+**Why the CLI rather than `@anthropic-ai/claude-agent-sdk`:** the SDK spawns this
+same binary underneath. Driving it directly removes an npm dependency, and the
+exact invocation below was verified working on this machine before the plan was
+written. Measured overhead is ~22.6k input tokens per call — the Claude Code
+harness rides along even with `--system-prompt` replacing the base prompt and
+tools disallowed. That overhead is prompt-cached, so one import run covering
+several games costs far less than the same games imported one at a time.
 
 **Files:**
-- Create: `server/src/explainer/agentSdk.js`
+- Create: `server/src/explainer/claudeCli.js`
 - Modify: `server/test/explainer.test.js` (append)
 
 **Interfaces:**
 - Consumes: `parseExplanations` from `./schema.js`; `SYSTEM_PROMPT`, `buildUserPrompt`, `buildRetryPrompt` from `./prompt.js`.
 - Produces:
-  - `collectText(messages) => string` — pure; extracts assistant text from Agent SDK messages
-  - `AGENT_OPTIONS` — the frozen option block described in Global Constraints
-  - `class AgentSdkExplainer` with `constructor({model?, queryImpl?, maxRetries?, startupImpl?})`, `async prewarm()` and `async explain({game, moments}) => (Explanation|null)[]`
-  - Satisfies the same Explainer contract as `FakeExplainer`: same length and order as `moments`, `null` where an explanation could not be produced.
+  - `CLI_FLAGS` — the frozen argument list that strips the harness
+  - `extractResult(stdout) => string` — pure; pulls `result` out of the CLI's JSON envelope
+  - `runClaude({prompt, systemPrompt, model, bin?, timeoutMs?}) => Promise<string>`
+  - `class ClaudeCliExplainer` with `constructor({model?, runImpl?, maxRetries?})` and `async explain({game, moments}) => (Explanation|null)[]`
+  - Satisfies the same Explainer contract as `FakeExplainer`: same length and order as `moments`, `null` where no explanation could be produced.
 
-`queryImpl` is injected so the class can be tested without spawning Claude. Production callers omit it and get the real `query` from the SDK.
+`runImpl` is injected so the class is testable without spawning anything.
 
 - [ ] **Step 1: Append the failing tests**
 
 Append to `server/test/explainer.test.js`:
 
 ```js
-import { collectText, AgentSdkExplainer, AGENT_OPTIONS } from '../src/explainer/agentSdk.js';
+import { extractResult, ClaudeCliExplainer, CLI_FLAGS } from '../src/explainer/claudeCli.js';
 
 const OK_JSON = JSON.stringify([{
   ply: 20, teachMove: 'd2d3', whatWentWrong: 'The bishop could just be taken.',
   whyBetter: 'd2d3 keeps it defended.', pattern: 'hanging piece',
 }]);
 
-// Build a fake `query` that yields the given text, recording the prompts it saw.
-function fakeQuery(texts, seen = []) {
+const envelope = (result, isError = false) =>
+  JSON.stringify({ is_error: isError, result, usage: { output_tokens: 1 } });
+
+// Fake `runClaude`: yields the given texts in order, recording what it was asked.
+function fakeRun(texts, seen = []) {
   let call = 0;
-  return ({ prompt, options }) => {
-    seen.push({ prompt, options });
-    const text = texts[Math.min(call++, texts.length - 1)];
-    return (async function* () {
-      yield { type: 'assistant', message: { content: [{ type: 'text', text }] } };
-      yield { type: 'result', subtype: 'success', result: text };
-    })();
+  return async (args) => {
+    seen.push(args);
+    return texts[Math.min(call++, texts.length - 1)];
   };
 }
 
-test('collectText prefers the result message', () => {
-  assert.equal(collectText([
-    { type: 'assistant', message: { content: [{ type: 'text', text: 'partial' }] } },
-    { type: 'result', subtype: 'success', result: 'final' },
-  ]), 'final');
+test('extractResult reads the result field out of the CLI envelope', () => {
+  assert.equal(extractResult(envelope('hello')), 'hello');
 });
 
-test('collectText falls back to concatenating assistant text blocks', () => {
-  assert.equal(collectText([
-    { type: 'system', subtype: 'init' },
-    { type: 'assistant', message: { content: [{ type: 'text', text: 'a' }, { type: 'thinking' }] } },
-    { type: 'assistant', message: { content: [{ type: 'text', text: 'b' }] } },
-  ]), 'ab');
+test('extractResult tolerates warning lines printed before the JSON', () => {
+  const noisy = 'Warning: no stdin data received in 3s, proceeding without it.\n' + envelope('hello');
+  assert.equal(extractResult(noisy), 'hello');
 });
 
-test('collectText returns an empty string when there is nothing to read', () => {
-  assert.equal(collectText([]), '');
-  assert.equal(collectText([{ type: 'system' }]), '');
+test('extractResult throws when the CLI reports an error', () => {
+  assert.throws(() => extractResult(envelope('boom', true)), /claude cli reported an error/i);
 });
 
-test('AGENT_OPTIONS strips the Claude Code harness', () => {
-  assert.deepEqual(AGENT_OPTIONS.settingSources, [], 'must not load the user CLAUDE.md');
-  assert.equal(AGENT_OPTIONS.maxTurns, 1);
+test('extractResult throws on output that is not an envelope', () => {
+  assert.throws(() => extractResult('command not found'), /could not parse/i);
+});
+
+test('CLI_FLAGS strip the harness', () => {
+  assert.ok(CLI_FLAGS.includes('--max-turns'));
+  assert.ok(CLI_FLAGS.includes('--output-format'));
+  assert.ok(CLI_FLAGS.includes('json'));
   for (const tool of ['Bash', 'Read', 'Write', 'Edit', 'WebFetch']) {
-    assert.ok(AGENT_OPTIONS.disallowedTools.includes(tool), `${tool} must be disallowed`);
+    assert.ok(CLI_FLAGS.includes(tool), `${tool} must be disallowed`);
   }
 });
 
-test('AgentSdkExplainer parses a good response and passes the stripped options', async () => {
+test('ClaudeCliExplainer parses a good response and passes the right arguments', async () => {
   const seen = [];
-  const explainer = new AgentSdkExplainer({ queryImpl: fakeQuery([OK_JSON], seen) });
+  const explainer = new ClaudeCliExplainer({ runImpl: fakeRun([OK_JSON], seen) });
   const got = await explainer.explain({ game: GAME, moments: MOMENTS });
 
   assert.equal(got.length, 1);
   assert.equal(got[0].teachMove, 'd2d3');
   assert.equal(seen.length, 1);
-  assert.deepEqual(seen[0].options.settingSources, []);
-  assert.equal(seen[0].options.model, 'claude-opus-5');
-  assert.equal(seen[0].options.systemPrompt, SYSTEM_PROMPT);
+  assert.equal(seen[0].model, 'claude-opus-5');
+  assert.equal(seen[0].systemPrompt, SYSTEM_PROMPT);
+  assert.match(seen[0].prompt, /ply 20/);
 });
 
-test('AgentSdkExplainer retries once on unparseable output', async () => {
+test('ClaudeCliExplainer retries once on unparseable output', async () => {
   const seen = [];
-  const explainer = new AgentSdkExplainer({ queryImpl: fakeQuery(['sorry, no', OK_JSON], seen) });
+  const explainer = new ClaudeCliExplainer({ runImpl: fakeRun(['sorry, no', OK_JSON], seen) });
   const got = await explainer.explain({ game: GAME, moments: MOMENTS });
 
   assert.equal(seen.length, 2);
@@ -1756,43 +1782,30 @@ test('AgentSdkExplainer retries once on unparseable output', async () => {
   assert.equal(got[0].teachMove, 'd2d3');
 });
 
-test('AgentSdkExplainer yields nulls after the retry also fails', async () => {
-  const explainer = new AgentSdkExplainer({ queryImpl: fakeQuery(['nope', 'still nope']) });
+test('ClaudeCliExplainer yields nulls after the retry also fails', async () => {
+  const explainer = new ClaudeCliExplainer({ runImpl: fakeRun(['nope', 'still nope']) });
   assert.deepEqual(await explainer.explain({ game: GAME, moments: MOMENTS }), [null]);
 });
 
-test('AgentSdkExplainer aligns responses to moments by ply, filling gaps with null', async () => {
+test('ClaudeCliExplainer aligns responses to moments by ply, filling gaps with null', async () => {
   const twoMoments = [MOMENTS[0], { ...MOMENTS[0], ply: 34 }];
-  const explainer = new AgentSdkExplainer({ queryImpl: fakeQuery([OK_JSON]) }); // only ply 20
+  const explainer = new ClaudeCliExplainer({ runImpl: fakeRun([OK_JSON]) }); // only ply 20
   const got = await explainer.explain({ game: GAME, moments: twoMoments });
   assert.equal(got.length, 2);
   assert.equal(got[0].ply, 20);
   assert.equal(got[1], null);
 });
 
-test('prewarm calls the SDK startup hook and swallows its failures', async () => {
-  let called = 0;
-  const ok = new AgentSdkExplainer({ queryImpl: fakeQuery([OK_JSON]), startupImpl: async () => { called += 1; } });
-  await ok.prewarm();
-  assert.equal(called, 1);
-
-  const boom = new AgentSdkExplainer({
-    queryImpl: fakeQuery([OK_JSON]),
-    startupImpl: async () => { throw new Error('no subprocess'); },
-  });
-  await boom.prewarm(); // must not throw — a cold start is not a failed import
-});
-
-test('AgentSdkExplainer makes no call for an empty moment list', async () => {
+test('ClaudeCliExplainer makes no call for an empty moment list', async () => {
   const seen = [];
-  const explainer = new AgentSdkExplainer({ queryImpl: fakeQuery([OK_JSON], seen) });
+  const explainer = new ClaudeCliExplainer({ runImpl: fakeRun([OK_JSON], seen) });
   assert.deepEqual(await explainer.explain({ game: GAME, moments: [] }), []);
   assert.equal(seen.length, 0);
 });
 
-test('AgentSdkExplainer survives a query that throws', async () => {
-  const explainer = new AgentSdkExplainer({
-    queryImpl: () => { throw new Error('usage limit reached'); },
+test('ClaudeCliExplainer survives a run that throws', async () => {
+  const explainer = new ClaudeCliExplainer({
+    runImpl: async () => { throw new Error('usage limit reached'); },
   });
   assert.deepEqual(await explainer.explain({ game: GAME, moments: MOMENTS }), [null]);
 });
@@ -1801,65 +1814,82 @@ test('AgentSdkExplainer survives a query that throws', async () => {
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `cd server && npm test`
-Expected: FAIL — `Cannot find module '../src/explainer/agentSdk.js'`.
+Expected: FAIL — `Cannot find module '../src/explainer/claudeCli.js'`.
 
 - [ ] **Step 3: Write the implementation**
 
-Create `server/src/explainer/agentSdk.js`:
+Create `server/src/explainer/claudeCli.js`:
 
 ```js
-import { query, startup } from '@anthropic-ai/claude-agent-sdk';
+import { spawn } from 'node:child_process';
 import { parseExplanations } from './schema.js';
 import { SYSTEM_PROMPT, buildUserPrompt, buildRetryPrompt } from './prompt.js';
 
 /**
- * The Agent SDK is Claude Code as a library, so by default it drags in tools
- * and on-disk settings we actively do not want for a single text call.
- *
- * settingSources: [] is load-bearing - without it the user's global CLAUDE.md
- * is injected into every chess prompt.
+ * Claude Code carries its own tools and scaffolding. For a single text call we
+ * want none of it: one turn, no tools, machine-readable output.
  */
-export const AGENT_OPTIONS = Object.freeze({
-  settingSources: [],
-  maxTurns: 1,
-  disallowedTools: Object.freeze([
-    'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Task',
-  ]),
-});
+export const CLI_FLAGS = Object.freeze([
+  '--max-turns', '1',
+  '--output-format', 'json',
+  '--disallowed-tools',
+  'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Task',
+]);
 
-/** Extract the assistant's text from the Agent SDK's message stream. */
-export function collectText(messages) {
-  const result = messages.find((m) => m?.type === 'result' && typeof m.result === 'string');
-  if (result) return result.result;
+/** Pull the assistant text out of the CLI's JSON envelope. */
+export function extractResult(stdout) {
+  const start = stdout.indexOf('{');
+  if (start === -1) throw new Error(`could not parse claude output: ${stdout.slice(0, 200)}`);
 
-  const parts = [];
-  for (const m of messages) {
-    if (m?.type !== 'assistant') continue;
-    for (const block of m.message?.content ?? m.content ?? []) {
-      if (block?.type === 'text' && typeof block.text === 'string') parts.push(block.text);
-    }
+  let envelope;
+  try {
+    envelope = JSON.parse(stdout.slice(start));
+  } catch {
+    throw new Error(`could not parse claude output: ${stdout.slice(0, 200)}`);
   }
-  return parts.join('');
+
+  if (envelope.is_error) throw new Error(`claude cli reported an error: ${envelope.result ?? ''}`);
+  return envelope.result ?? '';
 }
 
-export class AgentSdkExplainer {
-  constructor({ model = 'claude-opus-5', queryImpl = query, maxRetries = 1, startupImpl = startup } = {}) {
-    this.model = model;
-    this.queryImpl = queryImpl;
-    this.maxRetries = maxRetries;
-    this.startupImpl = startupImpl;
-  }
+/**
+ * Spawn `claude -p`. Credentials resolve exactly as they do for the interactive
+ * CLI, so this runs on the user's subscription. stdin is closed - the CLI waits
+ * on it otherwise and prints a warning after three seconds.
+ */
+export function runClaude({ prompt, systemPrompt, model, bin = process.env.CLAUDE_BIN || 'claude', timeoutMs = 180000 }) {
+  return new Promise((resolve, reject) => {
+    const args = ['-p', prompt, '--system-prompt', systemPrompt, '--model', model, ...CLI_FLAGS];
+    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
-  /**
-   * Pre-warm the CLI subprocess so the first game of a batch is not noticeably
-   * slower than the rest. Best-effort: never let a warm-up failure stop an import.
-   */
-  async prewarm() {
-    try {
-      await this.startupImpl?.();
-    } catch (err) {
-      console.warn(`[explainer] prewarm skipped: ${err.message}`);
-    }
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`claude timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    child.on('error', (err) => { clearTimeout(timer); reject(err); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) return reject(new Error(`claude exited ${code}: ${stderr.slice(0, 200)}`));
+      try {
+        resolve(extractResult(stdout));
+      } catch (err) {
+        reject(err);
+      }
+    });
+  });
+}
+
+export class ClaudeCliExplainer {
+  constructor({ model = 'claude-opus-5', runImpl = runClaude, maxRetries = 1 } = {}) {
+    this.model = model;
+    this.runImpl = runImpl;
+    this.maxRetries = maxRetries;
   }
 
   /** One call per game, covering every moment. Never throws. */
@@ -1874,9 +1904,9 @@ export class AgentSdkExplainer {
 
       let text = '';
       try {
-        text = await this.#ask(prompt);
+        text = await this.runImpl({ prompt, systemPrompt: SYSTEM_PROMPT, model: this.model });
       } catch (err) {
-        lastError = `query failed: ${err.message}`;
+        lastError = `claude failed: ${err.message}`;
         continue;
       }
 
@@ -1887,17 +1917,6 @@ export class AgentSdkExplainer {
 
     console.warn(`[explainer] giving up after ${this.maxRetries + 1} attempts: ${lastError}`);
     return moments.map(() => null);
-  }
-
-  async #ask(prompt) {
-    const messages = [];
-    for await (const message of this.queryImpl({
-      prompt,
-      options: { ...AGENT_OPTIONS, model: this.model, systemPrompt: SYSTEM_PROMPT },
-    })) {
-      messages.push(message);
-    }
-    return collectText(messages);
   }
 }
 
@@ -1911,18 +1930,17 @@ function alignToMoments(explanations, moments) {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd server && npm test`
-Expected: PASS. No real Claude call is made — every test injects `queryImpl`.
+Expected: PASS. No real Claude call is made — every test injects `runImpl`.
 
-- [ ] **Step 5: Verify the real SDK against your subscription once, by hand**
+- [ ] **Step 5: Verify against your subscription once, by hand**
 
 ```bash
-cd server && node -e "
-import('./src/explainer/agentSdk.js').then(async ({ AgentSdkExplainer }) => {
-  const e = new AgentSdkExplainer();
-  const out = await e.explain({
+cd server && echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-unset}" && node -e "
+import('./src/explainer/claudeCli.js').then(async ({ ClaudeCliExplainer }) => {
+  const out = await new ClaudeCliExplainer().explain({
     game: { reviewAsColor: 'w', result: 'loss' },
     moments: [{
-      ply: 20,
+      ply: 8,
       fen: 'r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 5',
       playedMove: 'Bxf7+', evalBefore: 30, evalAfter: -280, centipawnLoss: 310, kind: 'blunder',
       engineLines: [
@@ -1937,13 +1955,13 @@ import('./src/explainer/agentSdk.js').then(async ({ AgentSdkExplainer }) => {
 "
 ```
 
-Expected: a JSON object with a `teachMove` and beginner-readable prose. Confirm `ANTHROPIC_API_KEY` is unset first (`echo \${ANTHROPIC_API_KEY:-unset}`) — if it is set, the SDK bills the API instead of the subscription.
+Expected: `ANTHROPIC_API_KEY=unset`, then a JSON object with `teachMove: "d3"` (or `d2d3`) and beginner-readable prose. Takes roughly 10 seconds. If the key is *not* unset, stop and unset it — otherwise the call is billed to the API rather than the subscription.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add server/src/explainer/agentSdk.js server/test/explainer.test.js
-git commit -m "feat(explainer): Claude Agent SDK explainer on subscription auth"
+git add server/src/explainer/claudeCli.js server/test/explainer.test.js
+git commit -m "feat(explainer): explain via the claude CLI on subscription auth"
 ```
 
 ---
@@ -2256,7 +2274,6 @@ export async function fetchAndImport({
   db, engine, explainer, username, limit = 10, fetchImpl = fetch, onProgress = () => {},
 }) {
   onProgress({ done: 0, total: 0, phase: 'fetching' });
-  await explainer.prewarm?.();
   const games = await recentGames(username, {
     limit,
     fetchImpl,
@@ -2420,7 +2437,7 @@ Create `server/src/index.js`:
 import express from 'express';
 import { openDb, listGames, getGameWithMoments, recordAttempt } from './db.js';
 import { Engine, stockfishAvailable } from './engine.js';
-import { AgentSdkExplainer } from './explainer/agentSdk.js';
+import { ClaudeCliExplainer } from './explainer/claudeCli.js';
 import { fetchAndImport } from './importer.js';
 
 export function createApp({ db, engine, explainer, username }) {
@@ -2485,7 +2502,7 @@ async function start() {
 
   const db = openDb();
   const engine = await new Engine().start();
-  const explainer = new AgentSdkExplainer();
+  const explainer = new ClaudeCliExplainer();
 
   createApp({ db, engine, explainer, username }).listen(port, () => {
     console.log(`chess analyzer server on http://localhost:${port} (user: ${username})`);
@@ -3046,5 +3063,5 @@ At this point the tool is complete against the spec: import your chess.com games
 Deliberately not built, and why:
 - **Live game assistance** — prohibited by chess.com fair play, and would risk the account.
 - **Frontend tests** — the logic lives on the server; the UI is thin and manually verified.
-- **Rule-based explanation fallback** — the `Explainer` interface exists so this can be added as one file if the Agent SDK's usage-window cost becomes annoying.
+- **Rule-based explanation fallback** — the `Explainer` interface exists so this can be added as one file if the CLI's usage-window cost becomes annoying.
 - **Cross-game pattern analysis** ("you keep hanging knights") — the `attempts` and `moments` tables hold everything it needs, but it wants more than five games of history to be meaningful.
