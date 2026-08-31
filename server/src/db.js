@@ -66,6 +66,15 @@ export function saveGame(db, g) {
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(uuid) DO UPDATE SET
       username = excluded.username,
+      url = excluded.url,
+      pgn = excluded.pgn,
+      white = excluded.white,
+      black = excluded.black,
+      white_rating = excluded.white_rating,
+      black_rating = excluded.black_rating,
+      result = excluded.result,
+      time_class = excluded.time_class,
+      end_time = excluded.end_time,
       review_as_color = excluded.review_as_color
   `).run(
     g.uuid, g.username, g.url ?? null, g.pgn, g.white ?? null, g.black ?? null,
@@ -84,14 +93,32 @@ export function isAnalyzed(db, uuid) {
 }
 
 export function saveMoments(db, gameUuid, moments) {
-  db.prepare('DELETE FROM moments WHERE game_uuid = ?').run(gameUuid);
-  const insert = db.prepare(`
+  if (moments.length === 0) {
+    db.prepare('DELETE FROM moments WHERE game_uuid = ?').run(gameUuid);
+    return;
+  }
+  const plies = moments.map((m) => m.ply);
+  const placeholders = plies.map(() => '?').join(',');
+  db.prepare(`DELETE FROM moments WHERE game_uuid = ? AND ply NOT IN (${placeholders})`)
+    .run(gameUuid, ...plies);
+
+  const upsert = db.prepare(`
     INSERT INTO moments (game_uuid, ply, fen, played_move, eval_before, eval_after,
                          centipawn_loss, engine_lines, teach_move, explanation, kind)
     VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(game_uuid, ply) DO UPDATE SET
+      fen = excluded.fen,
+      played_move = excluded.played_move,
+      eval_before = excluded.eval_before,
+      eval_after = excluded.eval_after,
+      centipawn_loss = excluded.centipawn_loss,
+      engine_lines = excluded.engine_lines,
+      teach_move = excluded.teach_move,
+      explanation = excluded.explanation,
+      kind = excluded.kind
   `);
   for (const m of moments) {
-    insert.run(
+    upsert.run(
       gameUuid, m.ply, m.fen, m.playedMove,
       m.evalBefore ?? null, m.evalAfter ?? null, m.centipawnLoss,
       JSON.stringify(m.engineLines ?? []),
