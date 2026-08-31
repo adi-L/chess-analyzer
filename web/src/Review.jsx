@@ -14,6 +14,21 @@ function sanToSquares(fen, san) {
   }
 }
 
+/** Convert a UCI move (as stored in teach_move) into a played chess.js Move, for display and arrows. */
+function uciToMove(fen, uci) {
+  if (!uci) return null;
+  try {
+    const board = new Chess(fen);
+    return board.move({
+      from: uci.slice(0, 2),
+      to: uci.slice(2, 4),
+      promotion: uci.slice(4) || undefined,
+    });
+  } catch {
+    return null;
+  }
+}
+
 const RED = 'rgb(200, 60, 60)';
 const GREEN = 'rgb(45, 155, 85)';
 
@@ -29,7 +44,13 @@ export default function Review({ game, moments, onBack }) {
   const sign = game.review_as_color === 'w' ? 1 : -1;
   const asPawns = (cp) => {
     if (cp == null) return '?';
-    const v = (sign * cp) / 100;
+    const view = sign * cp;
+    if (Math.abs(cp) > 90000) {
+      const pliesToMate = 100000 - Math.abs(cp);
+      const movesToMate = Math.ceil(pliesToMate / 2);
+      return view >= 0 ? `mate in ${movesToMate}` : `mate against you in ${movesToMate}`;
+    }
+    const v = view / 100;
     return `${v >= 0 ? '+' : ''}${v.toFixed(1)}`;
   };
 
@@ -38,11 +59,21 @@ export default function Review({ game, moments, onBack }) {
     [moment],
   );
 
-  const teachSquares = useMemo(() => {
-    const t = moment?.teach_move;
-    if (!t || t.length < 4) return null;
-    return [t.slice(0, 2), t.slice(2, 4)];
-  }, [moment]);
+  // teach_move is UCI in the database; parse it once for both the arrow and
+  // the human-readable label. Falls back to the raw string if it can't be
+  // parsed against the moment's FEN.
+  const teachMove = useMemo(
+    () => (moment ? uciToMove(moment.fen, moment.teach_move) : null),
+    [moment],
+  );
+  const teachMoveLabel = moment?.teach_move ? (teachMove?.san ?? moment.teach_move) : null;
+  const teachSquares = teachMove ? [teachMove.from, teachMove.to] : null;
+
+  // The eval belongs to the teaching move specifically, not necessarily to
+  // MultiPV line 1 (eval_before), since the teaching move is often not the
+  // engine's top choice.
+  const teachEval =
+    moment?.engineLines?.find((l) => l.move === moment.teach_move)?.cpWhite ?? moment?.eval_before;
 
   const arrows = revealed
     ? [
@@ -135,8 +166,8 @@ export default function Review({ game, moments, onBack }) {
               {moment.teach_move && (
                 <tr>
                   <td>Better was</td>
-                  <td><strong>{moment.teach_move}</strong></td>
-                  <td>{asPawns(moment.eval_before)}</td>
+                  <td><strong>{teachMoveLabel}</strong></td>
+                  <td>{asPawns(teachEval)}</td>
                 </tr>
               )}
               {attempt && (
