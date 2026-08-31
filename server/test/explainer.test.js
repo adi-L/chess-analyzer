@@ -104,3 +104,99 @@ test('FakeExplainer can be told to fail, yielding nulls', async () => {
 test('FakeExplainer handles an empty moment list', async () => {
   assert.deepEqual(await new FakeExplainer().explain({ game: GAME, moments: [] }), []);
 });
+
+import { extractResult, ClaudeCliExplainer, CLI_FLAGS } from '../src/explainer/claudeCli.js';
+
+const OK_JSON = JSON.stringify([{
+  ply: 20, teachMove: 'd2d3', whatWentWrong: 'The bishop could just be taken.',
+  whyBetter: 'd2d3 keeps it defended.', pattern: 'hanging piece',
+}]);
+
+const envelope = (result, isError = false) =>
+  JSON.stringify({ is_error: isError, result, usage: { output_tokens: 1 } });
+
+// Fake `runClaude`: yields the given texts in order, recording what it was asked.
+function fakeRun(texts, seen = []) {
+  let call = 0;
+  return async (args) => {
+    seen.push(args);
+    return texts[Math.min(call++, texts.length - 1)];
+  };
+}
+
+test('extractResult reads the result field out of the CLI envelope', () => {
+  assert.equal(extractResult(envelope('hello')), 'hello');
+});
+
+test('extractResult tolerates warning lines printed before the JSON', () => {
+  const noisy = 'Warning: no stdin data received in 3s, proceeding without it.\n' + envelope('hello');
+  assert.equal(extractResult(noisy), 'hello');
+});
+
+test('extractResult throws when the CLI reports an error', () => {
+  assert.throws(() => extractResult(envelope('boom', true)), /claude cli reported an error/i);
+});
+
+test('extractResult throws on output that is not an envelope', () => {
+  assert.throws(() => extractResult('command not found'), /could not parse/i);
+});
+
+test('CLI_FLAGS strip the harness', () => {
+  assert.ok(CLI_FLAGS.includes('--max-turns'));
+  assert.ok(CLI_FLAGS.includes('--output-format'));
+  assert.ok(CLI_FLAGS.includes('json'));
+  for (const tool of ['Bash', 'Read', 'Write', 'Edit', 'WebFetch']) {
+    assert.ok(CLI_FLAGS.includes(tool), `${tool} must be disallowed`);
+  }
+});
+
+test('ClaudeCliExplainer parses a good response and passes the right arguments', async () => {
+  const seen = [];
+  const explainer = new ClaudeCliExplainer({ runImpl: fakeRun([OK_JSON], seen) });
+  const got = await explainer.explain({ game: GAME, moments: MOMENTS });
+
+  assert.equal(got.length, 1);
+  assert.equal(got[0].teachMove, 'd2d3');
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].model, 'claude-opus-5');
+  assert.equal(seen[0].systemPrompt, SYSTEM_PROMPT);
+  assert.match(seen[0].prompt, /ply 20/);
+});
+
+test('ClaudeCliExplainer retries once on unparseable output', async () => {
+  const seen = [];
+  const explainer = new ClaudeCliExplainer({ runImpl: fakeRun(['sorry, no', OK_JSON], seen) });
+  const got = await explainer.explain({ game: GAME, moments: MOMENTS });
+
+  assert.equal(seen.length, 2);
+  assert.match(seen[1].prompt, /could not be parsed/);
+  assert.equal(got[0].teachMove, 'd2d3');
+});
+
+test('ClaudeCliExplainer yields nulls after the retry also fails', async () => {
+  const explainer = new ClaudeCliExplainer({ runImpl: fakeRun(['nope', 'still nope']) });
+  assert.deepEqual(await explainer.explain({ game: GAME, moments: MOMENTS }), [null]);
+});
+
+test('ClaudeCliExplainer aligns responses to moments by ply, filling gaps with null', async () => {
+  const twoMoments = [MOMENTS[0], { ...MOMENTS[0], ply: 34 }];
+  const explainer = new ClaudeCliExplainer({ runImpl: fakeRun([OK_JSON]) }); // only ply 20
+  const got = await explainer.explain({ game: GAME, moments: twoMoments });
+  assert.equal(got.length, 2);
+  assert.equal(got[0].ply, 20);
+  assert.equal(got[1], null);
+});
+
+test('ClaudeCliExplainer makes no call for an empty moment list', async () => {
+  const seen = [];
+  const explainer = new ClaudeCliExplainer({ runImpl: fakeRun([OK_JSON], seen) });
+  assert.deepEqual(await explainer.explain({ game: GAME, moments: [] }), []);
+  assert.equal(seen.length, 0);
+});
+
+test('ClaudeCliExplainer survives a run that throws', async () => {
+  const explainer = new ClaudeCliExplainer({
+    runImpl: async () => { throw new Error('usage limit reached'); },
+  });
+  assert.deepEqual(await explainer.explain({ game: GAME, moments: MOMENTS }), [null]);
+});
