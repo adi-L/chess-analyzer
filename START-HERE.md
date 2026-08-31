@@ -14,7 +14,7 @@ Two processes, two shells. **Set `PORT` in both** — `server/src/index.js` and
 port 3000 is already taken by an unrelated project. Use something else, e.g.:
 
     # shell 1
-    cd server && PORT=4123 CHESS_CONTACT=you@example.com npm start
+    cd server && PORT=4123 CHESS_USERNAME=your_handle CHESS_CONTACT=you@example.com npm start
 
     # shell 2
     cd web && PORT=4123 npm run dev
@@ -40,8 +40,9 @@ framework there).
   that way.
 - `server/chess.db` is the cache of chess.com games + Stockfish analysis.
   Delete it to force a re-fetch/re-analyze; otherwise it just grows.
-- chess.com username: ExamplePlayer (rating ~229 rapid). Override with
-  `CHESS_USERNAME`.
+- `CHESS_USERNAME` is required — the chess.com handle whose games to review.
+  There is no default, so the server refuses to start without it rather than
+  importing someone else's games.
 - `CHESS_CONTACT` is the email that goes into the `User-Agent` chess.com
   requires — they block anonymous clients. It is read from the environment
   rather than hardcoded so a personal address stays out of this public repo;

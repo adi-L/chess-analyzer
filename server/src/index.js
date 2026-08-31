@@ -56,7 +56,11 @@ export function createApp({ db, engine, explainer, username }) {
 }
 
 async function start() {
-  const username = process.env.CHESS_USERNAME || 'ExamplePlayer';
+  const username = process.env.CHESS_USERNAME;
+  if (!username) {
+    console.error('Set CHESS_USERNAME to the chess.com account you want to review.');
+    process.exit(1);
+  }
   const port = Number(process.env.PORT || 3000);
 
   if (!stockfishAvailable()) {

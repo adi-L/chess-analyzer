@@ -64,7 +64,7 @@ proxy each default to 3000 independently.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `CHESS_USERNAME` | `ExamplePlayer` | Whose games to import |
+| `CHESS_USERNAME` | *(required)* | Whose games to import |
 | `CHESS_CONTACT` | `contact-not-set` | Goes into the `User-Agent`; chess.com blocks anonymous clients |
 | `PORT` | `3000` | API port (set it for the web dev server too) |
 | `STOCKFISH_PATH` | `stockfish` | Path to the engine binary |
