@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { listArchives, fetchMonth, recentGames, USER_AGENT } from '../src/chesscom.js';
+import { listArchives, fetchMonth, recentGames, USER_AGENT, buildUserAgent } from '../src/chesscom.js';
 
 function fakeFetch(routes, log = []) {
   return async (url, init = {}) => {
@@ -146,4 +146,13 @@ test('recentGames stores no ETag when an archive throws', async () => {
 
   // No ETags should be stored, even for u/2026/09 which succeeded
   assert.equal(store.size, 0);
+});
+
+test('buildUserAgent carries the configured contact and never hardcodes one', () => {
+  assert.equal(buildUserAgent('me@example.com'), 'chess-analyzer/0.1 (me@example.com)');
+  // chess.com wants contact info; without it the request is still identifiable
+  // as this app rather than failing or silently sending an empty parenthetical.
+  assert.equal(buildUserAgent(undefined), 'chess-analyzer/0.1 (contact-not-set)');
+  assert.equal(buildUserAgent(''), 'chess-analyzer/0.1 (contact-not-set)');
+  assert.match(USER_AGENT, /^chess-analyzer\/0\.1 \(.+\)$/);
 });

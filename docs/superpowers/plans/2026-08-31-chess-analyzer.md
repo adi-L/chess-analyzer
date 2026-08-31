@@ -14,7 +14,7 @@
 
 - Node **24+** required — the plan uses built-in `node:sqlite` (`DatabaseSync`) and `node:test`. No `better-sqlite3`, no test framework dependency.
 - All server code is **ESM** (`"type": "module"` in `server/package.json`). Use `import`, never `require`.
-- Chess.com API: **serial requests only** (parallel requests return 429). Every request must send `User-Agent: chess-analyzer/0.1 (contact-not-set)`. Anonymous clients are blocked.
+- Chess.com API: **serial requests only** (parallel requests return 429). Every request must send a `User-Agent` carrying contact info, read from `CHESS_CONTACT` (chess.com blocks anonymous clients). Anonymous clients are blocked.
 - Engine defaults: **depth 14**, **MultiPV 3**.
 - Moment selection: **100cp floor**, **600cp already-lost skip**, **max 5 moments** per game, **300cp opponent-blunder threshold** for `missed_win`.
 - Default username: **`ExamplePlayer`** (env `CHESS_USERNAME`).
@@ -1291,7 +1291,7 @@ Expected: FAIL — `Cannot find module '../src/chesscom.js'`.
 Create `server/src/chesscom.js`:
 
 ```js
-export const USER_AGENT = 'chess-analyzer/0.1 (contact-not-set)';
+export const USER_AGENT = buildUserAgent(process.env.CHESS_CONTACT);
 const BASE = 'https://api.chess.com/pub';
 
 function headerOf(res, name) {
